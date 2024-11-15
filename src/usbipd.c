@@ -88,7 +88,7 @@ static void usbipd_help(void)
 	printf("%s\n", usbipd_help_string);
 }
 
-static int recv_request_import(int sockfd)
+static int recv_request_import(int sockfd, SSL *ssl)
 {
 	struct op_import_request req;
 	struct usbip_exported_device *edev;
@@ -100,7 +100,7 @@ static int recv_request_import(int sockfd)
 
 	memset(&req, 0, sizeof(req));
 
-	rc = usbip_net_recv(sockfd, &req, sizeof(req));
+	rc = usbip_net_recv(ssl, &req, sizeof(req));
 	if (rc < 0) {
 		dbg("usbip_net_recv failed: import request");
 		return -1;
@@ -129,7 +129,7 @@ static int recv_request_import(int sockfd)
 		status = ST_NODEV;
 	}
 
-	rc = usbip_net_send_op_common(sockfd, OP_REP_IMPORT, status);
+	rc = usbip_net_send_op_common(ssl, OP_REP_IMPORT, status);
 	if (rc < 0) {
 		dbg("usbip_net_send_op_common failed: %#0x", OP_REP_IMPORT);
 		return -1;
@@ -143,7 +143,7 @@ static int recv_request_import(int sockfd)
 	memcpy(&pdu_udev, &edev->udev, sizeof(pdu_udev));
 	usbip_net_pack_usb_device(1, &pdu_udev);
 
-	rc = usbip_net_send(sockfd, &pdu_udev, sizeof(pdu_udev));
+	rc = usbip_net_send(ssl, &pdu_udev, sizeof(pdu_udev));
 	if (rc < 0) {
 		dbg("usbip_net_send failed: devinfo");
 		return -1;
@@ -154,7 +154,7 @@ static int recv_request_import(int sockfd)
 	return 0;
 }
 
-static int send_reply_devlist(int connfd)
+static int send_reply_devlist(SSL *ssl)
 {
 	struct usbip_exported_device *edev;
 	struct usbip_usb_device pdu_udev;
@@ -181,14 +181,14 @@ static int send_reply_devlist(int connfd)
 	}
 	info("exportable devices: %d", reply.ndev);
 
-	rc = usbip_net_send_op_common(connfd, OP_REP_DEVLIST, ST_OK);
+	rc = usbip_net_send_op_common(ssl, OP_REP_DEVLIST, ST_OK);
 	if (rc < 0) {
 		dbg("usbip_net_send_op_common failed: %#0x", OP_REP_DEVLIST);
 		return -1;
 	}
 	PACK_OP_DEVLIST_REPLY(1, &reply);
 
-	rc = usbip_net_send(connfd, &reply, sizeof(reply));
+	rc = usbip_net_send(ssl, &reply, sizeof(reply));
 	if (rc < 0) {
 		dbg("usbip_net_send failed: %#0x", OP_REP_DEVLIST);
 		return -1;
@@ -203,7 +203,7 @@ static int send_reply_devlist(int connfd)
 		memcpy(&pdu_udev, &edev->udev, sizeof(pdu_udev));
 		usbip_net_pack_usb_device(1, &pdu_udev);
 
-		rc = usbip_net_send(connfd, &pdu_udev, sizeof(pdu_udev));
+		rc = usbip_net_send(ssl, &pdu_udev, sizeof(pdu_udev));
 		if (rc < 0) {
 			dbg("usbip_net_send failed: pdu_udev");
 			return -1;
@@ -214,7 +214,7 @@ static int send_reply_devlist(int connfd)
 			memcpy(&pdu_uinf, &edev->uinf[i], sizeof(pdu_uinf));
 			usbip_net_pack_usb_interface(1, &pdu_uinf);
 
-			rc = usbip_net_send(connfd, &pdu_uinf,
+			rc = usbip_net_send(ssl, &pdu_uinf,
 					sizeof(pdu_uinf));
 			if (rc < 0) {
 				err("usbip_net_send failed: pdu_uinf");
@@ -226,20 +226,20 @@ static int send_reply_devlist(int connfd)
 	return 0;
 }
 
-static int recv_request_devlist(int connfd)
+static int recv_request_devlist(SSL *ssl)
 {
 	struct op_devlist_request req;
 	int rc;
 
 	memset(&req, 0, sizeof(req));
 
-	rc = usbip_net_recv(connfd, &req, sizeof(req));
+	rc = usbip_net_recv(ssl, &req, sizeof(req));
 	if (rc < 0) {
 		dbg("usbip_net_recv failed: devlist request");
 		return -1;
 	}
 
-	rc = send_reply_devlist(connfd);
+	rc = send_reply_devlist(ssl);
 	if (rc < 0) {
 		dbg("send_reply_devlist failed");
 		return -1;
@@ -248,13 +248,27 @@ static int recv_request_devlist(int connfd)
 	return 0;
 }
 
-static int recv_pdu(int connfd)
+static int recv_pdu(int connfd, SSL_CTX *ctx)
 {
 	uint16_t code = OP_UNSPEC;
 	int ret;
 	int status;
+	SSL *ssl;
 
-	ret = usbip_net_recv_op_common(connfd, &code, &status);
+	// Create SSL object and associate it with the client socket
+	ssl = SSL_new(ctx);
+	SSL_set_fd(ssl, connfd);
+
+	// SSL handshake
+	if (SSL_accept(ssl) <= 0) {
+		ERR_print_errors_fp(stderr);
+		close(connfd);
+		SSL_free(ssl);
+		dbg("SSL handshake failed");
+		return -1;
+	}
+
+	ret = usbip_net_recv_op_common(ssl, &code, &status);
 	if (ret < 0) {
 		dbg("could not receive opcode: %#0x", code);
 		return -1;
@@ -269,10 +283,10 @@ static int recv_pdu(int connfd)
 	info("received request: %#0x(%d)", code, connfd);
 	switch (code) {
 	case OP_REQ_DEVLIST:
-		ret = recv_request_devlist(connfd);
+		ret = recv_request_devlist(ssl);
 		break;
 	case OP_REQ_IMPORT:
-		ret = recv_request_import(connfd);
+		ret = recv_request_import(connfd, ssl);
 		break;
 	case OP_REQ_DEVINFO:
 	case OP_REQ_CRYPKEY:
@@ -285,7 +299,9 @@ static int recv_pdu(int connfd)
 		info("request %#0x(%d): complete", code, connfd);
 	else
 		info("request %#0x(%d): failed", code, connfd);
-
+    // Properly shutdown the SSL connection
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
 	return ret;
 }
 
@@ -339,7 +355,7 @@ static int do_accept(int listenfd)
 	return connfd;
 }
 
-int process_request(int listenfd)
+int process_request(int listenfd, SSL_CTX *ctx)
 {
 	pid_t childpid;
 	int connfd;
@@ -350,7 +366,7 @@ int process_request(int listenfd)
 	childpid = fork();
 	if (childpid == 0) {
 		close(listenfd);
-		recv_pdu(connfd);
+		recv_pdu(connfd, ctx);
 		exit(0);
 	}
 	close(connfd);
@@ -488,6 +504,33 @@ static void remove_pid_file(void)
 	}
 }
 
+static SSL_CTX *initialize_ssl_context_d() 
+{
+    SSL_CTX *ctx;
+
+    // Use TLS server method
+    ctx = SSL_CTX_new(TLS_server_method());
+    if (!ctx) {
+        ERR_print_errors_fp(stderr);
+        return NULL;
+    }
+
+    // Load server certificate and private key
+    if (SSL_CTX_use_certificate_file(ctx, "server.crt", SSL_FILETYPE_PEM) <= 0) {
+        ERR_print_errors_fp(stderr);
+        SSL_CTX_free(ctx);
+        return NULL;
+    }
+
+    if (SSL_CTX_use_PrivateKey_file(ctx, "server.key", SSL_FILETYPE_PEM) <= 0) {
+        ERR_print_errors_fp(stderr);
+        SSL_CTX_free(ctx);
+        return NULL;
+    }
+
+    return ctx;
+}
+
 static int do_standalone_mode(int daemonize, int ipv4, int ipv6)
 {
 	struct addrinfo *ai_head;
@@ -497,6 +540,20 @@ static int do_standalone_mode(int daemonize, int ipv4, int ipv6)
 	struct pollfd *fds;
 	struct timespec timeout;
 	sigset_t sigmask;
+	SSL_CTX *ctx;
+
+    // Initialize OpenSSL library
+    SSL_library_init();
+    OpenSSL_add_all_algorithms();
+    SSL_load_error_strings();
+
+    // Initialize SSL context
+    ctx = initialize_ssl_context_d();
+    if (!ctx) {
+        fprintf(stderr, "Failed to initialize SSL context\n");
+        return 1;
+    }
+
 
 	if (usbip_driver_open(driver))
 		return -1;
@@ -538,6 +595,7 @@ static int do_standalone_mode(int daemonize, int ipv4, int ipv6)
 	if (nsockfd <= 0) {
 		err("failed to open a listening socket");
 		usbip_driver_close(driver);
+		cleanup_ssl(ctx);
 		return -1;
 	}
 
@@ -568,7 +626,7 @@ static int do_standalone_mode(int daemonize, int ipv4, int ipv6)
 				if (fds[i].revents & POLLIN) {
 					dbg("read event on fd[%d]=%d",
 					    i, sockfdlist[i]);
-					process_request(sockfdlist[i]);
+					process_request(sockfdlist[i], ctx);
 				}
 			}
 		} else {
@@ -577,13 +635,15 @@ static int do_standalone_mode(int daemonize, int ipv4, int ipv6)
 	}
 
 	info("shutting down " PROGNAME);
+	cleanup_ssl(ctx);
+    close(sockfdlist[0]);
 	free(fds);
 	usbip_driver_close(driver);
 
 	return 0;
 }
 
-int main(int argc, char *argv[])
+int main(int argc, char *argv[]) 
 {
 	static const struct option longopts[] = {
 		{ "ipv4",     no_argument,       NULL, '4' },

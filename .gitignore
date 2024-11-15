@@ -79,3 +79,5 @@ src/usbip
 src/usbipd
 src/.*
 
+server.crt
+server.key

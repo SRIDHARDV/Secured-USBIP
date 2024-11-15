@@ -117,7 +117,7 @@ err_out:
 	return -1;
 }
 
-static int query_import_device(int sockfd, char *busid)
+static int query_import_device(int sockfd, char *busid, SSL *ssl)
 {
 	int rc;
 	struct op_import_request request;
@@ -129,7 +129,7 @@ static int query_import_device(int sockfd, char *busid)
 	memset(&reply, 0, sizeof(reply));
 
 	/* send a request */
-	rc = usbip_net_send_op_common(sockfd, OP_REQ_IMPORT, 0);
+	rc = usbip_net_send_op_common(ssl, OP_REQ_IMPORT, 0);
 	if (rc < 0) {
 		err("send op_common");
 		return -1;
@@ -139,21 +139,21 @@ static int query_import_device(int sockfd, char *busid)
 
 	PACK_OP_IMPORT_REQUEST(0, &request);
 
-	rc = usbip_net_send(sockfd, (void *) &request, sizeof(request));
+	rc = usbip_net_send(ssl, (void *) &request, sizeof(request));
 	if (rc < 0) {
 		err("send op_import_request");
 		return -1;
 	}
 
 	/* receive a reply */
-	rc = usbip_net_recv_op_common(sockfd, &code, &status);
+	rc = usbip_net_recv_op_common(ssl, &code, &status);
 	if (rc < 0) {
 		err("Attach Request for %s failed - %s\n",
 		    busid, usbip_op_common_status_string(status));
 		return -1;
 	}
 
-	rc = usbip_net_recv(sockfd, (void *) &reply, sizeof(reply));
+	rc = usbip_net_recv(ssl, (void *) &reply, sizeof(reply));
 	if (rc < 0) {
 		err("recv op_import_reply");
 		return -1;
@@ -176,14 +176,15 @@ static int attach_device(char *host, char *busid)
 	int sockfd;
 	int rc;
 	int rhport;
+	SSL *ssl;
 
-	sockfd = usbip_net_tcp_connect(host, usbip_port_string);
+	ssl = usbip_net_tcp_connect(host, usbip_port_string, &sockfd);
 	if (sockfd < 0) {
 		err("tcp connect");
 		return -1;
 	}
 
-	rhport = query_import_device(sockfd, busid);
+	rhport = query_import_device(sockfd, busid, ssl);
 	if (rhport < 0)
 		return -1;
 

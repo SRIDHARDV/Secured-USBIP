@@ -83,6 +83,10 @@ AC_ARG_WITH([tcp-wrappers],
 		AC_DEFINE([HAVE_LIBWRAP], [1], [use tcp wrapper])],
 	       [AC_MSG_RESULT([no]); LIBS="$saved_LIBS"])])
 
+# Check for OpenSSL
+AC_CHECK_LIB([ssl], [SSL_new], [LIBS="$LIBS -lssl"], [AC_MSG_ERROR([OpenSSL library not found])])
+AC_CHECK_LIB([crypto], [OSSL_LIB_CTX_free], [LIBS="$LIBS -lcrypto"], [AC_MSG_ERROR([crypto library not found])])
+
 # Sets directory containing usb.ids.
 AC_ARG_WITH([usbids-dir],
 	    [AS_HELP_STRING([--with-usbids-dir=DIR],

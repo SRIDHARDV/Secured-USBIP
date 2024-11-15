@@ -92,7 +92,7 @@ void usbip_net_pack_usb_interface(int pack __attribute__((unused)),
 	/* uint8_t members need nothing */
 }
 
-static ssize_t usbip_net_xmit(int sockfd, void *buff, size_t bufflen,
+static ssize_t usbip_net_xmit(SSL *ssl, void *buff, size_t bufflen,
 			      int sending)
 {
 	ssize_t nbytes;
@@ -103,9 +103,9 @@ static ssize_t usbip_net_xmit(int sockfd, void *buff, size_t bufflen,
 
 	do {
 		if (sending)
-			nbytes = send(sockfd, buff, bufflen, 0);
+			nbytes = SSL_write(ssl, buff, bufflen);
 		else
-			nbytes = recv(sockfd, buff, bufflen, MSG_WAITALL);
+			nbytes = SSL_read(ssl, buff, bufflen);
 
 		if (nbytes <= 0)
 			return -1;
@@ -119,14 +119,14 @@ static ssize_t usbip_net_xmit(int sockfd, void *buff, size_t bufflen,
 	return total;
 }
 
-ssize_t usbip_net_recv(int sockfd, void *buff, size_t bufflen)
+ssize_t usbip_net_recv(SSL *ssl, void *buff, size_t bufflen)
 {
-	return usbip_net_xmit(sockfd, buff, bufflen, 0);
+	return usbip_net_xmit(ssl, buff, bufflen, 0);
 }
 
-ssize_t usbip_net_send(int sockfd, void *buff, size_t bufflen)
+ssize_t usbip_net_send(SSL *ssl, void *buff, size_t bufflen)
 {
-	return usbip_net_xmit(sockfd, buff, bufflen, 1);
+	return usbip_net_xmit(ssl, buff, bufflen, 1);
 }
 
 static inline void usbip_net_pack_op_common(int pack,
@@ -137,7 +137,7 @@ static inline void usbip_net_pack_op_common(int pack,
 	op_common->status = usbip_net_pack_uint32_t(pack, op_common->status);
 }
 
-int usbip_net_send_op_common(int sockfd, uint32_t code, uint32_t status)
+int usbip_net_send_op_common(SSL *ssl, uint32_t code, uint32_t status)
 {
 	struct op_common op_common;
 	int rc;
@@ -150,7 +150,7 @@ int usbip_net_send_op_common(int sockfd, uint32_t code, uint32_t status)
 
 	usbip_net_pack_op_common(1, &op_common);
 
-	rc = usbip_net_send(sockfd, &op_common, sizeof(op_common));
+	rc = usbip_net_send(ssl, &op_common, sizeof(op_common));
 	if (rc < 0) {
 		dbg("usbip_net_send failed: %d", rc);
 		return -1;
@@ -159,14 +159,14 @@ int usbip_net_send_op_common(int sockfd, uint32_t code, uint32_t status)
 	return 0;
 }
 
-int usbip_net_recv_op_common(int sockfd, uint16_t *code, int *status)
+int usbip_net_recv_op_common(SSL *ssl, uint16_t *code, int *status)
 {
 	struct op_common op_common;
 	int rc;
 
 	memset(&op_common, 0, sizeof(op_common));
 
-	rc = usbip_net_recv(sockfd, &op_common, sizeof(op_common));
+	rc = usbip_net_recv(ssl, &op_common, sizeof(op_common));
 	if (rc < 0) {
 		dbg("usbip_net_recv failed: %d", rc);
 		goto err;
@@ -258,11 +258,11 @@ int usbip_net_set_v6only(int sockfd)
 /*
  * IPv6 Ready
  */
-int usbip_net_tcp_connect(char *hostname, char *service)
+SSL *usbip_net_tcp_connect(char *hostname, char *service, int *sockfd)
 {
 	struct addrinfo hints, *res, *rp;
-	int sockfd;
 	int ret;
+	SSL *ssl;
 
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = AF_UNSPEC;
@@ -273,31 +273,80 @@ int usbip_net_tcp_connect(char *hostname, char *service)
 	if (ret < 0) {
 		dbg("getaddrinfo: %s service %s: %s", hostname, service,
 		    gai_strerror(ret));
-		return ret;
+		*sockfd = ret;
+		return NULL;
 	}
 
 	/* try the addresses */
 	for (rp = res; rp; rp = rp->ai_next) {
-		sockfd = socket(rp->ai_family, rp->ai_socktype,
+		*sockfd = socket(rp->ai_family, rp->ai_socktype,
 				rp->ai_protocol);
-		if (sockfd < 0)
+		if (*sockfd < 0)
 			continue;
 
 		/* should set TCP_NODELAY for usbip */
-		usbip_net_set_nodelay(sockfd);
+		usbip_net_set_nodelay(*sockfd);
 		/* TODO: write code for heartbeat */
-		usbip_net_set_keepalive(sockfd);
+		usbip_net_set_keepalive(*sockfd);
 
-		if (connect(sockfd, rp->ai_addr, rp->ai_addrlen) == 0)
+		if (connect(*sockfd, rp->ai_addr, rp->ai_addrlen) == 0)
 			break;
 
-		close(sockfd);
+		close(*sockfd);
 	}
 
 	freeaddrinfo(res);
 
 	if (!rp)
-		return EAI_SYSTEM;
+	{
+		*sockfd =  EAI_SYSTEM;
+		return NULL;
+	}
 
-	return sockfd;
+	SSL_CTX *ctx = initialize_ssl_context();
+    if (!ctx) {
+        fprintf(stderr, "Failed to initialize SSL context\n");
+		*sockfd = -1;
+        return NULL;
+    }
+
+    ssl = SSL_new(ctx);
+    if (!ssl) {
+        ERR_print_errors_fp(stderr);
+        cleanup_ssl(ctx);
+        *sockfd = -1;
+		return NULL;
+    }
+
+    SSL_set_fd(ssl, *sockfd);
+    if (SSL_connect(ssl) <= 0) {
+        ERR_print_errors_fp(stderr);
+        SSL_free(ssl);
+        cleanup_ssl(ctx);
+        *sockfd = -1;
+		return NULL;
+    }
+
+    // Use `ssl` for SSL_read/SSL_write instead of plain socket functions
+    
+
+	return ssl;
+}
+
+SSL_CTX *initialize_ssl_context() {
+	SSL_CTX *ctx;
+    // Use TLS client method for SSL context
+    ctx = SSL_CTX_new(TLS_client_method());
+    if (!ctx) {
+        ERR_print_errors_fp(stderr);
+        return NULL;
+    }
+
+    return ctx;
+}
+
+void cleanup_ssl(SSL_CTX *ctx) {
+    if (ctx) {
+        SSL_CTX_free(ctx);
+    }
 }
